@@ -1,0 +1,42 @@
+# Rust
+target/
+Cargo.lock
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Windows
+*.tmp
+*.temp
+*.log
+
+# Build artifacts
+*.exe
+*.pdb
+
+# Output directories
+output/
+dataset/
+*_dataset/
+*_yolo_dataset/
+
+# Test files
+test_input/
+test_output/
+
+# Backup files
+*.bak
+*.backup
