@@ -5,6 +5,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
+use rand::seq::SliceRandom;
+use indicatif::{ProgressBar, ProgressStyle};
 
 #[derive(Parser)]
 #[command(name = "coco-to-yolo")]
@@ -25,6 +27,14 @@ struct Args {
     /// Format type: 'standard' for standard COCO format, 'damm' for DAMM dataset format
     #[arg(long, default_value = "damm")]
     format: String,
+    
+    /// Training split ratio (0.0 to 1.0)
+    #[arg(long, default_value = "0.8")]
+    train_split: f64,
+    
+    /// Create YOLO directory structure (images/labels with train/val splits)
+    #[arg(long, default_value_t = true)]
+    yolo_structure: bool,
 }
 
 // DAMM format annotation (custom format)
@@ -223,74 +233,229 @@ fn parse_standard_format(content: &str) -> Result<Vec<UnifiedImage>> {
     Ok(unified_images)
 }
 
-fn convert_coco_to_yolo(input_dir: &Path, output_dir: &Path, create_classes: bool, format: &str) -> Result<()> {
-    // Create output directory
+fn find_image_file(input_dir: &Path, image_filename: &str) -> Option<PathBuf> {
+    // Common image extensions to search for
+    let extensions = ["jpg", "jpeg", "png", "bmp", "tiff", "tif"];
+    
+    // Try with the exact filename first
+    for entry in WalkDir::new(input_dir).into_iter().filter_map(|e| e.ok()) {
+        if let Some(file_name) = entry.path().file_name() {
+            if file_name.to_str().unwrap_or("") == image_filename {
+                return Some(entry.path().to_path_buf());
+            }
+        }
+    }
+    
+    // If not found, try with different extensions
+    let base_name = Path::new(image_filename).file_stem()?.to_str()?;
+    for ext in &extensions {
+        let search_name = format!("{}.{}", base_name, ext);
+        for entry in WalkDir::new(input_dir).into_iter().filter_map(|e| e.ok()) {
+            if let Some(file_name) = entry.path().file_name() {
+                if file_name.to_str().unwrap_or("") == search_name {
+                    return Some(entry.path().to_path_buf());
+                }
+            }
+        }
+    }
+    
+    None
+}
+
+fn convert_coco_to_yolo(
+    input_dir: &Path, 
+    output_dir: &Path, 
+    create_classes: bool, 
+    format: &str,
+    train_split: f64,
+    yolo_structure: bool
+) -> Result<()> {
     fs::create_dir_all(output_dir).context("Failed to create output directory")?;
 
+    let mut all_images = Vec::new();
     let mut class_names = HashMap::new();
     let mut processed_files = 0;
     let mut total_annotations = 0;
 
     println!("Using format: {}", format);
+    println!("Scanning for metadata files...");
     
-    // Find all JSON files in input directory
+    // Find all JSON files first
+    let mut json_files = Vec::new();
     for entry in WalkDir::new(input_dir).into_iter().filter_map(|e| e.ok()) {
         let path = entry.path();
         if path.extension().and_then(|s| s.to_str()) == Some("json") {
-            println!("Processing: {}", path.display());
-            
-            let content = fs::read_to_string(path)
-                .with_context(|| format!("Failed to read file: {}", path.display()))?;
-            
-            // Parse based on format
-            let unified_images = match format {
-                "standard" => {
-                    parse_standard_format(&content)
-                        .with_context(|| format!("Failed to parse as standard COCO format: {}", path.display()))?
-                },
-                "damm" => {
-                    parse_damm_format(&content)
-                        .with_context(|| format!("Failed to parse as DAMM format: {}", path.display()))?
-                },
-                _ => {
-                    anyhow::bail!("Invalid format '{}'. Use 'standard' or 'damm'", format);
-                }
+            json_files.push(path.to_path_buf());
+        }
+    }
+    
+    if json_files.is_empty() {
+        anyhow::bail!("No JSON files found in input directory");
+    }
+    
+    println!("Found {} JSON files", json_files.len());
+    
+    // Create progress bar for JSON parsing
+    let pb_parse = ProgressBar::new(json_files.len() as u64);
+    pb_parse.set_style(
+        ProgressStyle::with_template(
+            "Parsing JSON    [{elapsed_precise}] [{bar:40.cyan/blue}] {pos:>7}/{len:7} {msg}"
+        )?
+        .progress_chars("#>-")
+    );
+    
+    // Parse all JSON files with progress bar
+    for json_file in &json_files {
+        let filename = json_file.file_name().unwrap_or_default().to_string_lossy();
+        pb_parse.set_message(format!("Processing {}", filename));
+        
+        let content = fs::read_to_string(json_file)
+            .with_context(|| format!("Failed to read file: {}", json_file.display()))?;
+        
+        let unified_images = match format {
+            "standard" => {
+                parse_standard_format(&content)
+                    .with_context(|| format!("Failed to parse as standard COCO format: {}", json_file.display()))?
+            },
+            "damm" => {
+                parse_damm_format(&content)
+                    .with_context(|| format!("Failed to parse as DAMM format: {}", json_file.display()))?
+            },
+            _ => {
+                anyhow::bail!("Invalid format '{}'. Use 'standard' or 'damm'", format);
+            }
+        };
+
+        all_images.extend(unified_images);
+        processed_files += 1;
+        pb_parse.inc(1);
+    }
+    
+    pb_parse.finish_with_message("JSON parsing complete");
+
+    let total_images = all_images.len();
+    println!("Found {} images total", total_images);
+    
+    if yolo_structure {
+        // Create YOLO directory structure
+        let train_images_dir = output_dir.join("images").join("train");
+        let train_labels_dir = output_dir.join("labels").join("train");
+        let val_images_dir = output_dir.join("images").join("val");
+        let val_labels_dir = output_dir.join("labels").join("val");
+        
+        fs::create_dir_all(&train_images_dir)?;
+        fs::create_dir_all(&train_labels_dir)?;
+        fs::create_dir_all(&val_images_dir)?;
+        fs::create_dir_all(&val_labels_dir)?;
+        
+        // Shuffle images for random split
+        let mut rng = rand::thread_rng();
+        let mut images = all_images;
+        images.shuffle(&mut rng);
+        
+        let train_count = (images.len() as f64 * train_split) as usize;
+        
+        println!("Split: {} training, {} validation images", train_count, images.len() - train_count);
+        
+        // Create progress bar for image processing
+        let pb_images = ProgressBar::new(images.len() as u64);
+        pb_images.set_style(
+            ProgressStyle::with_template(
+                "Processing     [{elapsed_precise}] [{bar:40.green/blue}] {pos:>7}/{len:7} {msg}"
+            )?
+            .progress_chars("#>-")
+        );
+        
+        let mut missing_images = 0;
+        
+        for (idx, image) in images.iter().enumerate() {
+            let is_train = idx < train_count;
+            let (images_dir, labels_dir, split_name) = if is_train {
+                (&train_images_dir, &train_labels_dir, "train")
+            } else {
+                (&val_images_dir, &val_labels_dir, "val")
             };
-
-            // Process all unified images
-            for image in unified_images {
-                let image_name = Path::new(&image.file_name)
-                    .file_stem()
-                    .unwrap_or_default()
-                    .to_str()
-                    .unwrap_or("unknown");
+            
+            // Extract filename from path
+            let image_filename = Path::new(&image.file_name)
+                .file_name()
+                .context("Invalid image filename")?
+                .to_str()
+                .context("Non-UTF8 filename")?;
+            
+            pb_images.set_message(format!("{} - {} ({} ann)", split_name, image_filename, image.annotations.len()));
+            
+            // Find the actual image file
+            if let Some(source_image_path) = find_image_file(input_dir, image_filename) {
+                let dest_image_path = images_dir.join(image_filename);
+                fs::copy(&source_image_path, &dest_image_path)
+                    .with_context(|| format!("Failed to copy image: {}", source_image_path.display()))?;
                 
-                let output_file = output_dir.join(format!("{}.txt", image_name));
+                // Create annotation file
+                let base_name = Path::new(image_filename)
+                    .file_stem()
+                    .unwrap()
+                    .to_str()
+                    .unwrap();
+                let annotation_path = labels_dir.join(format!("{}.txt", base_name));
+                
                 let mut yolo_annotations = Vec::new();
-
                 for annotation in &image.annotations {
                     let yolo_ann = YoloAnnotation::from_unified(annotation, image.width, image.height);
                     yolo_annotations.push(yolo_ann.to_string());
-                    
-                    // Store class name for classes.txt
                     class_names.insert(annotation.category_id, format!("class_{}", annotation.category_id));
                     total_annotations += 1;
                 }
-
-                // Write YOLO format file (even if empty)
+                
                 let content = if yolo_annotations.is_empty() { 
                     String::new() 
                 } else { 
-                    yolo_annotations.join("\n") 
+                    yolo_annotations.join("\n") + "\n"
                 };
                 
-                fs::write(&output_file, content)
-                    .with_context(|| format!("Failed to write output file: {}", output_file.display()))?;
-                
-                println!("  -> Generated: {} ({} annotations)", output_file.display(), image.annotations.len());
+                fs::write(&annotation_path, content)
+                    .with_context(|| format!("Failed to write annotation file: {}", annotation_path.display()))?;
+            } else {
+                missing_images += 1;
             }
             
-            processed_files += 1;
+            pb_images.inc(1);
+        }
+        
+        pb_images.finish_with_message("Image processing complete");
+        
+        if missing_images > 0 {
+            println!("Warning: {} image files not found", missing_images);
+        }
+    } else {
+        // Legacy flat structure
+        for image in &all_images {
+            let image_name = Path::new(&image.file_name)
+                .file_stem()
+                .unwrap_or_default()
+                .to_str()
+                .unwrap_or("unknown");
+            
+            let output_file = output_dir.join(format!("{}.txt", image_name));
+            let mut yolo_annotations = Vec::new();
+
+            for annotation in &image.annotations {
+                let yolo_ann = YoloAnnotation::from_unified(annotation, image.width, image.height);
+                yolo_annotations.push(yolo_ann.to_string());
+                class_names.insert(annotation.category_id, format!("class_{}", annotation.category_id));
+                total_annotations += 1;
+            }
+
+            let content = if yolo_annotations.is_empty() { 
+                String::new() 
+            } else { 
+                yolo_annotations.join("\n") + "\n"
+            };
+            
+            fs::write(&output_file, content)
+                .with_context(|| format!("Failed to write output file: {}", output_file.display()))?;
+            
+            println!("  -> Generated: {} ({} annotations)", output_file.display(), image.annotations.len());
         }
     }
 
@@ -304,16 +469,17 @@ fn convert_coco_to_yolo(input_dir: &Path, output_dir: &Path, create_classes: boo
             .into_iter()
             .map(|(_, name)| name)
             .collect::<Vec<_>>()
-            .join("\n");
+            .join("\n") + "\n";
         
         fs::write(&classes_file, class_content)
             .with_context(|| format!("Failed to write classes file: {}", classes_file.display()))?;
         
-        println!("Generated classes file: {}", classes_file.display());
+        println!("\nGenerated classes file: {}", classes_file.display());
     }
 
     println!("\nConversion completed!");
-    println!("Processed files: {}", processed_files);
+    println!("Processed JSON files: {}", processed_files);
+    println!("Total images: {}", total_images);
     println!("Total annotations: {}", total_annotations);
     
     Ok(())
@@ -331,7 +497,7 @@ fn main() -> Result<()> {
     println!("Output directory: {}", args.output.display());
     println!();
 
-    convert_coco_to_yolo(&args.input, &args.output, args.create_classes, &args.format)?;
+    convert_coco_to_yolo(&args.input, &args.output, args.create_classes, &args.format, args.train_split, args.yolo_structure)?;
     
     Ok(())
 }
