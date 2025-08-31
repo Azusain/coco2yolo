@@ -337,11 +337,11 @@ fn convert_coco_to_yolo(
     println!("Found {} images total", total_images);
     
     if yolo_structure {
-        // Create YOLO directory structure
-        let train_images_dir = output_dir.join("images").join("train");
-        let train_labels_dir = output_dir.join("labels").join("train");
-        let val_images_dir = output_dir.join("images").join("val");
-        let val_labels_dir = output_dir.join("labels").join("val");
+        // Create professional YOLO directory structure
+        let train_images_dir = output_dir.join("train").join("images");
+        let train_labels_dir = output_dir.join("train").join("labels");
+        let val_images_dir = output_dir.join("val").join("images");
+        let val_labels_dir = output_dir.join("val").join("labels");
         
         fs::create_dir_all(&train_images_dir)?;
         fs::create_dir_all(&train_labels_dir)?;

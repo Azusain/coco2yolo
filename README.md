@@ -53,12 +53,20 @@ cargo build --release
 ```
 output_directory/
 ├── classes.txt                 # Class definitions
-├── images/
-│   ├── train/                  # Training images
-│   └── val/                    # Validation images
-└── labels/
-    ├── train/                  # Training labels (.txt files)
-    └── val/                    # Validation labels (.txt files)
+├── train/
+│   ├── images/                 # Training images
+│   │   ├── img1.jpg
+│   │   └── img2.jpg
+│   └── labels/                 # Training labels (.txt files)
+│       ├── img1.txt
+│       └── img2.txt
+└── val/
+    ├── images/                 # Validation images
+    │   ├── imgA.jpg
+    │   └── imgB.jpg
+    └── labels/                 # Validation labels (.txt files)
+        ├── imgA.txt
+        └── imgB.txt
 ```
 
 **Label Format:** Each `.txt` file contains one line per object:
